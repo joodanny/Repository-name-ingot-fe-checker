@@ -10,8 +10,15 @@ from pathlib import Path
 import anthropic
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 from openpyxl import Workbook
+
+# ── 커스텀 후면 카메라 컴포넌트 ───────────────────────────────────────────────
+_rear_camera = components.declare_component(
+    "rear_camera",
+    path=str(Path(__file__).parent / "camera_component")
+)
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 THRESHOLD = 0.09
@@ -109,17 +116,11 @@ def load_reference_data(csv_text: str):
     return df.dropna(subset=["batch_no","Fe"]).drop_duplicates(subset=["batch_no"])
 
 # ── 이미지 전처리 (EXIF 보정 + 줌) ───────────────────────────────────────────
-def preprocess_image(image_bytes: bytes, zoom: float = 1.0) -> bytes:
+def preprocess_image(image_bytes: bytes) -> bytes:
+    """EXIF 방향 자동 보정 (줌은 카메라 컴포넌트에서 처리)"""
     img = Image.open(io.BytesIO(image_bytes))
-    # EXIF 방향 자동 보정
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
-    # 디지털 줌 (중앙 크롭)
-    if zoom > 1.0:
-        w, h = img.size
-        cw, ch = int(w / zoom), int(h / zoom)
-        img = img.crop(((w-cw)//2, (h-ch)//2, (w+cw)//2, (h+ch)//2))
-        img = img.resize((w, h), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=92)
     return buf.getvalue()
@@ -338,12 +339,18 @@ with tab_cam:
     if st.session_state.pending:
         show_recognition_result(st.session_state.pending, ref_df)
     else:
-        st.info("📱 라벨을 가로로 맞추고 촬영하세요!")
-        zoom = st.slider("🔍 디지털 줌", 1.0, 4.0, 1.0, 0.1, format="%.1fx")
-        cam_image = st.camera_input("라벨을 중앙에 맞추고 촬영",
-                                    key=f"cam_{st.session_state.cam_key}")
-        if cam_image:
-            processed = preprocess_image(cam_image.getvalue(), zoom)
+        st.info("📱 후면 카메라로 라벨을 가로로 맞추고 촬영하세요!")
+
+        # 커스텀 후면 카메라 컴포넌트
+        captured_b64 = _rear_camera(key="rear_cam")
+
+        # 새 사진이 찍혔을 때만 처리 (중복 실행 방지)
+        if (captured_b64
+                and captured_b64 != st.session_state.get("last_capture_b64")):
+            st.session_state.last_capture_b64 = captured_b64
+            image_bytes = base64.b64decode(captured_b64)
+            processed = preprocess_image(image_bytes)   # EXIF 보정
+
             with st.spinner("🔄 라벨 인식 중... (2~3초)"):
                 try:
                     extracted = extract_label(processed, api_key)
@@ -359,17 +366,12 @@ with tab_cam:
                 st.rerun()
             else:
                 st.warning("번호를 인식하지 못했습니다. 더 가까이, 선명하게 찍어보세요.")
-                if st.button("🔄 다시 찍기"):
-                    st.session_state.cam_key += 1
-                    st.rerun()
 
 # ── 파일 업로드 탭 ────────────────────────────────────────────────────────────
 with tab_file:
-    zoom_f = st.slider("🔍 디지털 줌", 1.0, 4.0, 1.0, 0.1,
-                       format="%.1fx", key="zoom_file")
     uploaded = st.file_uploader("사진 선택", type=["jpg","jpeg","png"])
     if uploaded:
-        processed = preprocess_image(uploaded.getvalue(), zoom_f)
+        processed = preprocess_image(uploaded.getvalue())
         st.image(processed, use_container_width=True)
         with st.spinner("🔄 라벨 인식 중..."):
             try:

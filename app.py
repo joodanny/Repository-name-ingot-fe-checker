@@ -16,6 +16,7 @@ from openpyxl import Workbook
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 THRESHOLD = 0.09
+DATA_FILE = Path(__file__).parent / "ingot_data.json"
 
 st.set_page_config(
     page_title="잉곳 Fe 판정기",
@@ -72,6 +73,43 @@ def get_api_key():
         import os
         return os.environ.get("ANTHROPIC_API_KEY", "")
 
+# ── 데이터 파일 저장/불러오기 ─────────────────────────────────────────────────
+def save_data():
+    """ingot_list를 JSON 파일에 저장 (이미지 제외하고 저장, 용량 절약)"""
+    try:
+        records_to_save = []
+        for r in st.session_state.ingot_list:
+            rec = {k: v for k, v in r.items() if k != "_img"}
+            records_to_save.append(rec)
+        DATA_FILE.write_text(
+            json.dumps({
+                "ingot_list": records_to_save,
+                "label_counter": st.session_state.label_counter,
+            }, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass  # 파일 쓰기 실패해도 앱 중단 안 함
+
+def load_data():
+    """앱 시작 시 JSON 파일에서 데이터 로드"""
+    try:
+        if DATA_FILE.exists():
+            raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+            saved_list = raw.get("ingot_list", [])
+            saved_counter = raw.get("label_counter", {})
+            # 이미 session_state에 데이터 없을 때만 로드
+            if not st.session_state.ingot_list:
+                for r in saved_list:
+                    if "_img" not in r:
+                        r["_img"] = ""
+                    st.session_state.ingot_list = saved_list
+                    break
+            if not st.session_state.label_counter:
+                st.session_state.label_counter = saved_counter
+    except Exception:
+        pass
+
 # ── 자동 라벨링 ───────────────────────────────────────────────────────────────
 def get_next_label() -> str:
     today = datetime.now().strftime("%y%m%d")
@@ -103,9 +141,8 @@ def load_reference_data(csv_text: str):
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["batch_no","Fe"]).drop_duplicates(subset=["batch_no"])
 
-# ── 이미지 전처리 (EXIF 보정 + 줌) ───────────────────────────────────────────
+# ── 이미지 전처리 (EXIF 보정) ─────────────────────────────────────────────────
 def preprocess_image(image_bytes: bytes) -> bytes:
-    """EXIF 방향 자동 보정 (줌은 카메라 컴포넌트에서 처리)"""
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
@@ -137,13 +174,15 @@ def call_claude(image_bytes: bytes, api_key: str) -> dict:
 JSON 형식으로만 답하세요.
 
 Vedanta 라벨:
-{"label_type": "vedanta", "batch_no": "26D02874-26", "net_weight": 0.979, "weight_unit": "MT"}
+{"label_type": "vedanta", "batch_no": "26D02874-26", "net_weight": 0.979, "weight_unit": "MT", "barcode": "바코드값", "qr_code": null}
 
 RUSAL/Allow 라벨:
-{"label_type": "rusal", "batch_no": "072787-16", "net_weight": 1004, "weight_unit": "kg"}
+{"label_type": "rusal", "batch_no": "072787-16", "net_weight": 1004, "weight_unit": "kg", "barcode": "바코드값", "qr_code": "QR값"}
 
 - batch_no: BATCH 번호 또는 Cast No (원본 그대로)
 - net_weight: N.Wt(MT) 또는 Net kg 숫자만
+- barcode: 바코드에서 읽은 텍스트 (없으면 null)
+- qr_code: QR코드에서 읽은 텍스트 (없으면 null)
 - 읽을 수 없으면 null
 JSON만 출력하세요."""}
             ]
@@ -154,7 +193,7 @@ JSON만 출력하세요."""}
     return json.loads(m.group()) if m else {}
 
 def extract_label(image_bytes: bytes, api_key: str) -> dict:
-    """원본 → 180° 회전 순으로 시도, batch_no 인식되면 반환"""
+    """원본 → 180° → 90° → 270° 순으로 시도, batch_no 인식되면 반환"""
     for angle in [0, 180, 90, 270]:
         rotated = rotate_image_bytes(image_bytes, angle) if angle != 0 else image_bytes
         result = call_claude(rotated, api_key)
@@ -191,11 +230,11 @@ def make_excel_bytes(records: list) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.append(["라벨ID","확인시각","라벨유형","Batch/Cast No",
-                "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태"])
+                "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태","바코드","QR코드"])
     for r in records:
         ws.append([r.get(c) for c in
                    ["라벨ID","확인시각","라벨유형","batch_no",
-                    "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태"]])
+                    "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태","바코드","QR코드"]])
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 def make_zip_bytes(records: list) -> bytes:
@@ -208,18 +247,20 @@ def make_zip_bytes(records: list) -> bytes:
                             base64.b64decode(r["_img"]))
     buf.seek(0); return buf.getvalue()
 
-# ── 인식 결과 카드 (확인/다시 버튼 포함) ──────────────────────────────────────
+# ── 인식 결과 카드 ─────────────────────────────────────────────────────────────
 def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     extracted = pending["extracted"]
     image_bytes = pending["image_bytes"]
-    source = pending["source"]
 
     batch_no    = extracted.get("batch_no", "")
     net_weight  = extracted.get("net_weight")
     weight_unit = extracted.get("weight_unit", "MT")
+    barcode     = extracted.get("barcode")
+    qr_code     = extracted.get("qr_code")
     label_type  = "Vedanta" if extracted.get("label_type") == "vedanta" else "RUSAL/Allow"
     rotated     = extracted.get("_rotated", 0)
 
+    # 사진
     st.image(image_bytes, use_container_width=True)
     if rotated:
         st.caption(f"🔄 {rotated}° 회전하여 인식")
@@ -227,14 +268,18 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     # 번호 수정 가능
     edited_no = st.text_input("인식된 번호 (수정 가능)", value=batch_no,
                               key="pending_batch_edit")
+
+    # 무게 수정 가능
+    unit_label = "N.Wt (MT)" if weight_unit == "MT" else "Net (kg)"
+    edited_wt = st.text_input(
+        f"⚖️ {unit_label} (수정 가능)",
+        value=str(net_weight) if net_weight is not None else "",
+        key="pending_nw_edit"
+    )
+
+    # Fe 판정
     result = lookup_batch(edited_no, ref_df) if edited_no else None
 
-    # 무게 표시
-    if net_weight is not None:
-        unit_label = "N.Wt (MT)" if weight_unit == "MT" else "Net (kg)"
-        st.write(f"⚖️ {unit_label}: **{net_weight}**")
-
-    # Fe 판정 결과 표시
     if result:
         if result["found"]:
             fe = result["fe"]
@@ -242,24 +287,12 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                 st.error(f"## ❌ 불합격 (NG) — Fe = {fe:.4f}")
             else:
                 st.success(f"## ✅ 합격 (OK) — Fe = {fe:.4f}")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Batch/Cast No", result["batch_no"])
-                st.metric("Fe", f"{fe:.4f}")
-            with col2:
-                if result.get("si"): st.metric("Si", f"{result['si']:.4f}")
-                if result.get("cu"): st.metric("Cu", f"{result['cu']:.4f}")
-            with col3:
-                if result.get("zn"): st.metric("Zn", f"{result['zn']:.4f}")
-                if result.get("mg"): st.metric("Mg", f"{result['mg']:.4f}")
         else:
             st.warning(f"⚠️ 기준표에 없는 번호: `{result['batch_no']}`")
             if result.get("suggestions"):
                 st.write("유사 번호: " + " / ".join(f"`{s}`" for s in result["suggestions"]))
 
-    st.divider()
-
-    # ── 확인 / 다시 버튼 ──────────────────────────────────────────────────────
+    # ── 확인 / 다시 버튼 (판정 결과 바로 아래) ──────────────────────────────
     col_ok, col_retry = st.columns(2)
 
     with col_ok:
@@ -268,7 +301,12 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                      disabled=ok_disabled, type="primary"):
             if result:
                 label_id = get_next_label()
-                nw = f"{net_weight} {weight_unit}" if net_weight else "-"
+                # 수정된 무게 값 사용
+                try:
+                    wt_val = float(edited_wt) if edited_wt.strip() else None
+                except ValueError:
+                    wt_val = None
+                nw = f"{wt_val} {weight_unit}" if wt_val is not None else "-"
                 img_b64 = base64.b64encode(image_bytes).decode()
                 st.session_state.ingot_list.append({
                     "라벨ID":   label_id,
@@ -282,8 +320,11 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                     "Zn":  result.get("zn", ""),
                     "판정": result.get("judgement", ""),
                     "상태": result.get("status", "조회불가"),
+                    "바코드": barcode or "",
+                    "QR코드": qr_code or "",
                     "_img": img_b64,
                 })
+                save_data()
                 st.success(f"✅ {label_id} 저장 완료!")
                 st.session_state.pending = None
                 st.session_state.cam_key += 1
@@ -294,6 +335,29 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
             st.session_state.pending = None
             st.session_state.cam_key += 1
             st.rerun()
+
+    # 상세 성분 (버튼 아래)
+    if result and result["found"]:
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        fe = result["fe"]
+        with col1:
+            st.metric("Batch/Cast No", result["batch_no"])
+            st.metric("Fe", f"{fe:.4f}")
+        with col2:
+            if result.get("si"): st.metric("Si", f"{result['si']:.4f}")
+            if result.get("cu"): st.metric("Cu", f"{result['cu']:.4f}")
+        with col3:
+            if result.get("zn"): st.metric("Zn", f"{result['zn']:.4f}")
+            if result.get("mg"): st.metric("Mg", f"{result['mg']:.4f}")
+
+    # 바코드/QR 정보
+    if barcode or qr_code:
+        st.divider()
+        if barcode:
+            st.caption(f"📊 바코드: `{barcode}`")
+        if qr_code:
+            st.caption(f"📱 QR코드: `{qr_code}`")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  메인
@@ -306,6 +370,9 @@ for key, val in [("ingot_list",[]), ("label_counter",{}),
                  ("pending", None), ("cam_key", 0)]:
     if key not in st.session_state:
         st.session_state[key] = val
+
+# 저장된 데이터 불러오기 (앱 시작 시)
+load_data()
 
 api_key = get_api_key()
 if not api_key:
@@ -327,24 +394,10 @@ with tab_cam:
         show_recognition_result(st.session_state.pending, ref_df)
     else:
         st.info("📱 라벨을 가로로 맞추고 촬영하세요! (후면 카메라가 자동 선택됩니다)")
-        zoom = st.slider("🔍 줌 (촬영 후 적용)", 1.0, 4.0, 1.0, 0.1,
-                         format="%.1fx", key="zoom_cam")
         cam_image = st.camera_input("라벨을 중앙에 맞추고 촬영",
                                     key=f"cam_{st.session_state.cam_key}")
         if cam_image:
-            raw = preprocess_image(cam_image.getvalue())
-            # 줌 적용 (중앙 크롭)
-            if zoom > 1.0:
-                img = Image.open(io.BytesIO(raw))
-                w, h = img.size
-                cw, ch = int(w/zoom), int(h/zoom)
-                img = img.crop(((w-cw)//2,(h-ch)//2,(w+cw)//2,(h+ch)//2))
-                img = img.resize((w,h), Image.LANCZOS)
-                buf = io.BytesIO(); img.save(buf, "JPEG", quality=92)
-                processed = buf.getvalue()
-            else:
-                processed = raw
-
+            processed = preprocess_image(cam_image.getvalue())
             with st.spinner("🔄 라벨 인식 중... (2~3초)"):
                 try:
                     extracted = extract_label(processed, api_key)
@@ -377,7 +430,6 @@ with tab_file:
                 st.error(f"API 오류: {e}"); extracted = {}
 
         if extracted.get("batch_no"):
-            # 파일 탭은 pending 없이 바로 결과 표시 + 확인 버튼
             st.session_state.pending = {
                 "extracted":   extracted,
                 "image_bytes": processed,
@@ -407,8 +459,10 @@ with tab_manual:
             "Cu":  result.get("cu",""), "Zn": result.get("zn",""),
             "판정": result.get("judgement",""),
             "상태": result.get("status","조회불가"),
+            "바코드": "", "QR코드": "",
             "_img": "",
         })
+        save_data()
         if result["found"]:
             fe = result["fe"]
             if fe >= THRESHOLD:
@@ -424,8 +478,13 @@ st.subheader("📋 확인된 잉곳 목록")
 
 if st.session_state.ingot_list:
     display_cols = ["라벨ID","확인시각","라벨유형","batch_no",
-                    "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태"]
-    df_list = pd.DataFrame(st.session_state.ingot_list)[display_cols]
+                    "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태","바코드","QR코드"]
+    # 없는 컬럼은 빈 문자열로 채움 (이전 저장 데이터 호환)
+    df_raw = pd.DataFrame(st.session_state.ingot_list)
+    for c in display_cols:
+        if c not in df_raw.columns:
+            df_raw[c] = ""
+    df_list = df_raw[display_cols]
     st.dataframe(df_list, use_container_width=True)
 
     only_ng = [r for r in st.session_state.ingot_list if r.get("상태") == "NG"]
@@ -444,8 +503,13 @@ if st.session_state.ingot_list:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        if st.button("🗑️ 전체 삭제"):
+        if st.button("🗑️ 초기화"):
             st.session_state.ingot_list = []
+            st.session_state.label_counter = {}
+            try:
+                DATA_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
             st.rerun()
     with c2:
         st.download_button("⬇️ 전체 엑셀",

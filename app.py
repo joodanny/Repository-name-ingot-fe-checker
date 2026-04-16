@@ -22,9 +22,10 @@ st.set_page_config(
     layout="centered"
 )
 
-# ── 모바일 최적화 CSS ─────────────────────────────────────────────────────────
+# ── 모바일 최적화 CSS + 후면 카메라 고정 JS ──────────────────────────────────
 st.markdown("""
 <style>
+/* 카메라 가로 모드 */
 [data-testid="stCameraInput"] video {
     width: 100% !important;
     aspect-ratio: 16/9 !important;
@@ -36,7 +37,36 @@ st.markdown("""
     overflow: hidden;
 }
 .block-container { padding: 0.5rem 1rem !important; }
+
+/* 성분 결과 폰트 축소 */
+[data-testid="stMetric"] label {
+    font-size: 0.65rem !important;
+}
+[data-testid="stMetricValue"] > div {
+    font-size: 1.0rem !important;
+}
+[data-testid="stMetricDelta"] {
+    font-size: 0.6rem !important;
+}
 </style>
+
+<script>
+/* 후면 카메라 강제 고정 */
+(function() {
+    const _getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = function(constraints) {
+        if (constraints && constraints.video) {
+            const videoConstraint = typeof constraints.video === 'object'
+                ? constraints.video : {};
+            constraints.video = {
+                ...videoConstraint,
+                facingMode: { ideal: 'environment' }
+            };
+        }
+        return _getUserMedia(constraints);
+    };
+})();
+</script>
 """, unsafe_allow_html=True)
 
 # ── API 키 ────────────────────────────────────────────────────────────────────
@@ -424,22 +454,4 @@ if st.session_state.ingot_list:
             file_name=f"ingot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with c3:
-        if only_ng:
-            st.download_button("⬇️ NG 엑셀",
-                data=make_excel_bytes(only_ng),
-                file_name=f"ingot_NG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    with c4:
-        st.download_button("⬇️ 사진+엑셀 ZIP",
-            data=make_zip_bytes(st.session_state.ingot_list),
-            file_name=f"ingot_zip_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip")
-
-    with st.sidebar:
-        st.header("📊 오늘 현황")
-        today = datetime.now().strftime("%y%m%d")
-        today_count = st.session_state.label_counter.get(today, 0)
-        st.metric("오늘 처리", f"{today_count}건")
-        st.caption(f"다음 라벨: {today}-{today_count+1:02d}")
-else:
-    st.info("아직 확인된 잉곳이 없습니다.")
+        if only_ng

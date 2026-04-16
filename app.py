@@ -454,4 +454,22 @@ if st.session_state.ingot_list:
             file_name=f"ingot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with c3:
-        if only_ng
+        if only_ng:
+            st.download_button("⬇️ NG 엑셀",
+                data=make_excel_bytes(only_ng),
+                file_name=f"ingot_NG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with c4:
+        st.download_button("⬇️ 사진+엑셀 ZIP",
+            data=make_zip_bytes(st.session_state.ingot_list),
+            file_name=f"ingot_zip_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mime="application/zip")
+
+    with st.sidebar:
+        st.header("📊 오늘 현황")
+        today = datetime.now().strftime("%y%m%d")
+        today_count = st.session_state.label_counter.get(today, 0)
+        st.metric("오늘 처리", f"{today_count}건")
+        st.caption(f"다음 라벨: {today}-{today_count+1:02d}")
+else:
+    st.info("아직 확인된 잉곳이 없습니다.")

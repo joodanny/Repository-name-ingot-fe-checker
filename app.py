@@ -447,7 +447,8 @@ with tab_manual:
 
 # ── 바코드 스캔 탭 ────────────────────────────────────────────────────────────
 with tab_barcode:
-    st.info("📷 바코드/QR코드를 가까이, 선명하게 촬영하세요.")
+    st.info("📷 바코드와 핸드폰 거리를 **15~20cm (손 한 뼘)** 으로 유지하고 촬영하세요.\n\n"
+            "너무 가까우면 흐려지고, 너무 멀면 작아서 인식이 안 됩니다.")
 
     if "barcode_cam_key" not in st.session_state:
         st.session_state.barcode_cam_key = 0
@@ -476,22 +477,47 @@ with tab_barcode:
                     return []
 
                 w, h = base.size
+                # 흐린 사진 보정용 언샤프 마스크
+                unsharp       = base.filter(ImageFilter.UnsharpMask(radius=2, percent=200, threshold=3))
+                unsharp_gray  = unsharp.convert("L")
+                unsharp_big   = unsharp.resize((w*2, h*2), Image.LANCZOS).convert("L")
+
                 attempts = [
-                    base,                                                      # 원본 RGB
-                    gray,                                                      # 그레이스케일
-                    ImageEnhance.Contrast(gray).enhance(2.0),                 # 대비 2배
-                    ImageEnhance.Contrast(gray).enhance(3.5),                 # 대비 3.5배
-                    ImageEnhance.Sharpness(gray).enhance(3.0),                # 선명도
-                    base.filter(ImageFilter.SHARPEN).convert("L"),            # 샤프닝
-                    base.resize((w*2, h*2), Image.LANCZOS),                   # 2배 확대
-                    base.resize((w*2, h*2), Image.LANCZOS).convert("L"),      # 2배+그레이
+                    base,                                                           # 원본
+                    gray,                                                           # 그레이
+                    unsharp,                                                        # 언샤프(흐림보정)
+                    unsharp_gray,                                                   # 언샤프+그레이
+                    ImageEnhance.Contrast(unsharp_gray).enhance(2.0),              # 언샤프+대비
+                    ImageEnhance.Contrast(gray).enhance(2.0),                      # 대비2배
+                    ImageEnhance.Contrast(gray).enhance(3.5),                      # 대비3.5배
+                    ImageEnhance.Sharpness(gray).enhance(3.0),                     # 선명도
+                    base.filter(ImageFilter.SHARPEN).convert("L"),                 # 샤프닝
+                    base.resize((w*2, h*2), Image.LANCZOS),                        # 2배확대
+                    base.resize((w*2, h*2), Image.LANCZOS).convert("L"),           # 2배+그레이
                     ImageEnhance.Contrast(
                         base.resize((w*2, h*2), Image.LANCZOS).convert("L")
-                    ).enhance(3.0),                                            # 2배+대비
-                    base.resize((w*3, h*3), Image.LANCZOS).convert("L"),      # 3배 확대
+                    ).enhance(3.0),                                                 # 2배+대비
+                    unsharp_big,                                                    # 2배+언샤프
+                    ImageEnhance.Contrast(unsharp_big).enhance(2.5),               # 2배+언샤프+대비
+                    base.resize((w*3, h*3), Image.LANCZOS).convert("L"),           # 3배확대
                 ]
 
                 decoded = try_all(attempts)
+
+                # Phase 2: 기울기 보정 — ±5°씩 최대 ±30° 회전 시도
+                if not decoded:
+                    for angle in [-5, 5, -10, 10, -15, 15, -20, 20, -25, 25, -30, 30]:
+                        rotated_gray = gray.rotate(
+                            angle, expand=True, fillcolor=255)
+                        rotated_unsharp = unsharp_gray.rotate(
+                            angle, expand=True, fillcolor=255)
+                        decoded = try_all([
+                            rotated_gray,
+                            rotated_unsharp,
+                            ImageEnhance.Contrast(rotated_unsharp).enhance(2.0),
+                        ])
+                        if decoded:
+                            break
 
                 if decoded:
                     scanned_default = decoded[0].data.decode("utf-8", errors="replace")
@@ -502,11 +528,11 @@ with tab_barcode:
                 else:
                     st.warning(
                         "❌ 인식 실패\n\n"
-                        "**촬영 방법:**\n"
-                        "- 바코드가 화면을 **꽉 채우도록** 가까이 찍기\n"
-                        "- 바코드를 **수평으로** 맞추기 (기울이지 않기)\n"
-                        "- 그림자 없이 **밝은 곳**에서 찍기\n"
-                        "- 핸드폰을 **고정**하고 흔들리지 않게 찍기"
+                        "**체크리스트:**\n"
+                        "- 📏 거리: 바코드에서 **15~20cm** (너무 가까우면 흐려짐)\n"
+                        "- 📐 각도: 바코드를 **정면·수평**으로 (기울이지 않기)\n"
+                        "- 💡 밝기: 그림자 없이 **밝은 곳**에서\n"
+                        "- 🤚 고정: 흔들리지 않게 **핸드폰을 고정** 후 촬영"
                     )
             except ImportError as e:
                 st.error(f"⚠️ pyzbar 로드 실패: {e}")

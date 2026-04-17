@@ -448,7 +448,7 @@ with tab_manual:
 
 # ── 바코드 스캔 탭 ────────────────────────────────────────────────────────────
 with tab_barcode:
-    st.info("📷 바코드/QR코드를 촬영하면 자동으로 인식됩니다.\n가능한 가까이, 선명하게 찍으세요.")
+    st.info("📷 바코드/QR코드를 가까이, 선명하게 촬영하세요.")
 
     if "barcode_cam_key" not in st.session_state:
         st.session_state.barcode_cam_key = 0
@@ -456,69 +456,34 @@ with tab_barcode:
     barcode_photo = st.camera_input("바코드/QR코드 촬영",
                                     key=f"bc_cam_{st.session_state.barcode_cam_key}")
 
+    # 인식 결과 표시 및 편집
+    scanned_default = ""
     if barcode_photo:
-        # 이미지 축소 후 base64 변환 (ZXing에 전달)
-        img = Image.open(io.BytesIO(barcode_photo.getvalue()))
-        img = ImageOps.exif_transpose(img).convert("RGB")
-        img.thumbnail((900, 700))
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=88)
-        img_b64 = base64.b64encode(buf.getvalue()).decode()
-
-        # ZXing-js로 정지 이미지에서 바코드 디코딩 (라이브 카메라 불필요)
-        components.html(f"""<!DOCTYPE html>
-<html><body style="margin:0;padding:6px;background:#0e1117;color:#fff;font-family:sans-serif">
-<div id="r" style="padding:10px;background:#1e2130;border-radius:8px;font-size:14px;word-break:break-all">
-  ⏳ 바코드 디코딩 중...
-</div>
-<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
-<script>
-(async function(){{
-  try {{
-    var reader = new ZXing.BrowserMultiFormatReader();
-    var result = await reader.decodeFromImageUrl('data:image/jpeg;base64,{img_b64}');
-    var val = result.getText();
-    document.getElementById('r').innerHTML =
-      '<span style="color:#21c354;font-weight:bold">✅ 인식됨:</span> ' +
-      '<span style="font-size:16px">&nbsp;' + val + '</span>';
-    injectBarcode(val);
-  }} catch(e) {{
-    document.getElementById('r').innerHTML =
-      '❌ 인식 실패 — 더 가까이, 선명하게 다시 촬영하세요';
-  }}
-}})();
-
-function injectBarcode(value) {{
-  try {{
-    var doc = window.parent.document;
-    var inputs = doc.querySelectorAll('input[type="text"]');
-    for (var i = 0; i < inputs.length; i++) {{
-      var inp = inputs[i];
-      var c = inp.closest('[data-testid="stTextInput"]');
-      if (!c) continue;
-      var lbl = c.querySelector('label');
-      if (!lbl || lbl.textContent.indexOf('📊 바코드') === -1) continue;
-      var rk = Object.keys(inp).find(function(k){{ return k.indexOf('__reactProps$') === 0; }});
-      if (rk && inp[rk] && inp[rk].onChange) {{
-        inp[rk].onChange({{target:{{value:value}}}});
-        setTimeout(function(){{ if (inp[rk].onBlur) inp[rk].onBlur({{target:{{value:value}}}}); }}, 200);
-        return;
-      }}
-      var s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-      s.call(inp, value);
-      inp.dispatchEvent(new Event('input',  {{bubbles:true}}));
-      inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-      inp.dispatchEvent(new Event('blur',   {{bubbles:true}}));
-      return;
-    }}
-  }} catch(e) {{}}
-}}
-</script></body></html>""", height=70)
+        bc_img = preprocess_image(barcode_photo.getvalue())
+        with st.spinner("🔄 바코드 인식 중..."):
+            try:
+                from pyzbar import pyzbar as pzb
+                pil_img = Image.open(io.BytesIO(bc_img)).convert("RGB")
+                decoded = pzb.decode(pil_img)
+                if decoded:
+                    scanned_default = decoded[0].data.decode("utf-8", errors="replace")
+                    types = [d.type for d in decoded]
+                    st.success(f"✅ 인식됨 ({', '.join(types)}): `{scanned_default}`")
+                    if len(decoded) > 1:
+                        st.caption("기타: " + " / ".join(
+                            f"`{d.data.decode('utf-8','replace')}`" for d in decoded[1:]))
+                else:
+                    st.warning("❌ 바코드를 찾지 못했습니다. 더 가까이, 선명하게 찍어보세요.")
+            except ImportError:
+                st.error("⚠️ pyzbar 라이브러리가 설치되지 않았습니다. 잠시 후 재시도하세요.")
+            except Exception as e:
+                st.error(f"오류: {e}")
 
     scanned = st.text_input(
         "📊 바코드 인식 결과 (수정 가능)",
+        value=scanned_default,
         key="scanned_barcode",
-        placeholder="촬영하면 자동 입력됩니다"
+        placeholder="촬영 후 자동 입력됩니다"
     )
 
     if st.button("🔄 다시 찍기", key="barcode_retry"):

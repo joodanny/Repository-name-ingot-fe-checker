@@ -522,8 +522,9 @@ with tab_barcode:
                 if decoded:
                     scanned_default = decoded[0].data.decode("utf-8", errors="replace")
                     types = [d.type for d in decoded]
-                    # session_state에 직접 주입 → text_input에 자동 반영
-                    st.session_state["scanned_barcode"] = scanned_default
+                    # 디코딩 성공 시 고유 ID 증가 → text_input 키 변경 → value= 적용됨
+                    st.session_state["_bc_val"]  = scanned_default
+                    st.session_state["_bc_id"]   = st.session_state.get("_bc_id", 0) + 1
                     st.success(f"✅ 인식됨 ({', '.join(types)}): `{scanned_default}`")
                 else:
                     st.warning(
@@ -539,10 +540,11 @@ with tab_barcode:
             except Exception as e:
                 st.error(f"오류: {type(e).__name__}: {e}")
 
+    bc_id = st.session_state.get("_bc_id", 0)
     scanned = st.text_input(
         "📊 바코드 인식 결과 (수정 가능)",
-        value=scanned_default,
-        key="scanned_barcode",
+        value=st.session_state.get("_bc_val", ""),
+        key=f"scanned_barcode_{bc_id}",
         placeholder="촬영 후 자동 입력됩니다"
     )
 
@@ -570,7 +572,8 @@ with tab_barcode:
             st.success(f"✅ [{target['라벨ID']}] 바코드 저장 완료: `{scanned}`")
             # 카메라 초기화 → 촬영 모드로 복귀
             st.session_state.barcode_cam_key += 1
-            st.session_state["scanned_barcode"] = ""
+            st.session_state["_bc_val"] = ""
+            st.session_state["_bc_id"] = st.session_state.get("_bc_id", 0) + 1
             st.rerun()
     else:
         st.warning("⚠️ 먼저 📷 카메라 탭에서 잉곳을 추가하세요.")

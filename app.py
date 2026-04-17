@@ -76,8 +76,7 @@ def get_api_key():
 # ── 데이터 파일 저장/불러오기 ─────────────────────────────────────────────────
 def save_data():
     try:
-        records_to_save = [{k: v for k, v in r.items() if k != "_img"}
-                           for r in st.session_state.ingot_list]
+        records_to_save = [dict(r) for r in st.session_state.ingot_list]
         DATA_FILE.write_text(
             json.dumps({"ingot_list": records_to_save,
                         "label_counter": st.session_state.label_counter},

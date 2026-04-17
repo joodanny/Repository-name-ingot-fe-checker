@@ -543,6 +543,9 @@ with tab_barcode:
                     break
             save_data()
             st.success(f"✅ [{target['라벨ID']}] 바코드 저장 완료: `{scanned}`")
+            # 카메라 초기화 → 촬영 모드로 복귀
+            st.session_state.barcode_cam_key += 1
+            st.session_state["scanned_barcode"] = ""
             st.rerun()
     else:
         st.warning("⚠️ 먼저 📷 카메라 탭에서 잉곳을 추가하세요.")

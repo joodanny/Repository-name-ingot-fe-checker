@@ -141,6 +141,28 @@ def load_reference_data(csv_text: str):
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["batch_no","Fe"]).drop_duplicates(subset=["batch_no"])
 
+# ── ZXing 바코드/QR 디코딩 ────────────────────────────────────────────────────
+def decode_barcodes(image_bytes: bytes) -> dict:
+    """ZXing-C++로 바코드/QR 전체 디코딩 (pyzbar 불필요, 네이티브 라이브러리 불필요)"""
+    try:
+        import zxingcpp
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        results = zxingcpp.read_barcodes(img)
+        barcodes, qr_codes = [], []
+        for r in results:
+            fmt = str(r.format).lower()
+            if "qr" in fmt:
+                qr_codes.append(r.text)
+            else:
+                barcodes.append(r.text)
+        return {
+            "barcode": barcodes[0] if barcodes else None,
+            "qr_code": qr_codes[0] if qr_codes else None,
+            "all": [r.text for r in results],
+        }
+    except Exception:
+        return {"barcode": None, "qr_code": None, "all": []}
+
 # ── 이미지 전처리 (EXIF 보정) ─────────────────────────────────────────────────
 def preprocess_image(image_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(image_bytes))
@@ -255,10 +277,15 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     batch_no    = extracted.get("batch_no", "")
     net_weight  = extracted.get("net_weight")
     weight_unit = extracted.get("weight_unit", "MT")
-    barcode     = extracted.get("barcode")
-    qr_code     = extracted.get("qr_code")
     label_type  = "Vedanta" if extracted.get("label_type") == "vedanta" else "RUSAL/Allow"
     rotated     = extracted.get("_rotated", 0)
+
+    # 바코드/QR: ZXing 우선, 없으면 Claude 결과 사용
+    zxing       = pending.get("zxing", {})
+    barcode     = zxing.get("barcode") or extracted.get("barcode")
+    qr_code     = zxing.get("qr_code") or extracted.get("qr_code")
+    barcode_src = "🔍 ZXing" if zxing.get("barcode") else ("👁️ Claude" if extracted.get("barcode") else "")
+    qr_src      = "🔍 ZXing" if zxing.get("qr_code") else ("👁️ Claude" if extracted.get("qr_code") else "")
 
     # 사진
     st.image(image_bytes, use_container_width=True)
@@ -355,9 +382,9 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     if barcode or qr_code:
         st.divider()
         if barcode:
-            st.caption(f"📊 바코드: `{barcode}`")
+            st.caption(f"📊 바코드 {barcode_src}: `{barcode}`")
         if qr_code:
-            st.caption(f"📱 QR코드: `{qr_code}`")
+            st.caption(f"📱 QR코드 {qr_src}: `{qr_code}`")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  메인
@@ -401,14 +428,16 @@ with tab_cam:
             with st.spinner("🔄 라벨 인식 중... (2~3초)"):
                 try:
                     extracted = extract_label(processed, api_key)
+                    zxing = decode_barcodes(processed)
                 except Exception as e:
-                    st.error(f"API 오류: {e}"); extracted = {}
+                    st.error(f"API 오류: {e}"); extracted = {}; zxing = {}
 
             if extracted.get("batch_no"):
                 st.session_state.pending = {
                     "extracted":   extracted,
                     "image_bytes": processed,
                     "source":      "카메라",
+                    "zxing":       zxing,
                 }
                 st.rerun()
             else:
@@ -426,14 +455,16 @@ with tab_file:
         with st.spinner("🔄 라벨 인식 중..."):
             try:
                 extracted = extract_label(processed, api_key)
+                zxing = decode_barcodes(processed)
             except Exception as e:
-                st.error(f"API 오류: {e}"); extracted = {}
+                st.error(f"API 오류: {e}"); extracted = {}; zxing = {}
 
         if extracted.get("batch_no"):
             st.session_state.pending = {
                 "extracted":   extracted,
                 "image_bytes": processed,
                 "source":      "파일",
+                "zxing":       zxing,
             }
             show_recognition_result(st.session_state.pending, ref_df)
         else:

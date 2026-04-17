@@ -463,40 +463,54 @@ with tab_barcode:
         with st.spinner("🔄 바코드 인식 중..."):
             try:
                 from pyzbar import pyzbar as pzb
-                import pyzbar as pyzbar_pkg
-                pil_img = Image.open(io.BytesIO(bc_img)).convert("RGB")
+                from PIL import ImageEnhance, ImageFilter
 
-                # 1차: 원본
-                decoded = pzb.decode(pil_img)
+                base = Image.open(io.BytesIO(bc_img)).convert("RGB")
+                gray = base.convert("L")
 
-                # 2차: 고대비 그레이스케일로 재시도
-                if not decoded:
-                    gray = pil_img.convert("L")
-                    decoded = pzb.decode(gray)
+                # 순서대로 시도 — 성공하면 즉시 반환
+                def try_all(img_list):
+                    for im in img_list:
+                        r = pzb.decode(im)
+                        if r:
+                            return r
+                    return []
 
-                # 3차: 이미지 2배 확대 후 재시도
-                if not decoded:
-                    big = pil_img.resize(
-                        (pil_img.width * 2, pil_img.height * 2), Image.LANCZOS)
-                    decoded = pzb.decode(big)
+                w, h = base.size
+                attempts = [
+                    base,                                                      # 원본 RGB
+                    gray,                                                      # 그레이스케일
+                    ImageEnhance.Contrast(gray).enhance(2.0),                 # 대비 2배
+                    ImageEnhance.Contrast(gray).enhance(3.5),                 # 대비 3.5배
+                    ImageEnhance.Sharpness(gray).enhance(3.0),                # 선명도
+                    base.filter(ImageFilter.SHARPEN).convert("L"),            # 샤프닝
+                    base.resize((w*2, h*2), Image.LANCZOS),                   # 2배 확대
+                    base.resize((w*2, h*2), Image.LANCZOS).convert("L"),      # 2배+그레이
+                    ImageEnhance.Contrast(
+                        base.resize((w*2, h*2), Image.LANCZOS).convert("L")
+                    ).enhance(3.0),                                            # 2배+대비
+                    base.resize((w*3, h*3), Image.LANCZOS).convert("L"),      # 3배 확대
+                ]
+
+                decoded = try_all(attempts)
 
                 if decoded:
                     scanned_default = decoded[0].data.decode("utf-8", errors="replace")
                     types = [d.type for d in decoded]
                     st.success(f"✅ 인식됨 ({', '.join(types)}): `{scanned_default}`")
-                    if len(decoded) > 1:
-                        st.caption("기타: " + " / ".join(
-                            f"`{d.data.decode('utf-8','replace')}`" for d in decoded[1:]))
                 else:
-                    st.warning("❌ 인식 실패 — 아래 방법을 시도해보세요:\n\n"
-                               "• 바코드만 화면에 크게 채우기\n"
-                               "• 밝은 곳에서 촬영\n"
-                               "• 흔들리지 않게 고정 후 촬영")
-
+                    st.warning(
+                        "❌ 인식 실패\n\n"
+                        "**촬영 방법:**\n"
+                        "- 바코드가 화면을 **꽉 채우도록** 가까이 찍기\n"
+                        "- 바코드를 **수평으로** 맞추기 (기울이지 않기)\n"
+                        "- 그림자 없이 **밝은 곳**에서 찍기\n"
+                        "- 핸드폰을 **고정**하고 흔들리지 않게 찍기"
+                    )
             except ImportError as e:
-                st.error(f"⚠️ pyzbar 로드 실패: {e}\n\npackages.txt(libzbar0)가 적용됐는지 확인하세요.")
+                st.error(f"⚠️ pyzbar 로드 실패: {e}")
             except Exception as e:
-                st.error(f"오류 상세: {type(e).__name__}: {e}")
+                st.error(f"오류: {type(e).__name__}: {e}")
 
     scanned = st.text_input(
         "📊 바코드 인식 결과 (수정 가능)",

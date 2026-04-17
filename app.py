@@ -65,6 +65,145 @@ components.html("""
 </script>
 """, height=0)
 
+# ── 바코드 스캐너 HTML (ZXing-js, 브라우저 내장 카메라로 직접 스캔) ───────────
+SCANNER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0e1117; color: #fafafa; font-family: sans-serif; padding: 6px; }
+#video {
+  width: 100%; height: 220px;
+  background: #111; display: block;
+  border-radius: 8px; object-fit: cover;
+}
+#result {
+  padding: 10px 12px; margin: 6px 0;
+  background: #1e2130; border-radius: 8px;
+  font-size: 14px; min-height: 42px;
+  word-break: break-all; line-height: 1.5;
+}
+#status { font-size: 11px; color: #aaa; padding: 3px 0 5px; }
+.btns { display: flex; gap: 6px; }
+button {
+  flex: 1; padding: 10px 0; border: none;
+  border-radius: 6px; cursor: pointer;
+  font-size: 14px; font-weight: 700;
+}
+#btn-scan { background: #ff4b4b; color: #fff; }
+#btn-copy { background: #21c354; color: #fff; display: none; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<div id="status">▶ 스캔 시작을 누르세요</div>
+<div id="result">대기 중...</div>
+<div class="btns">
+  <button id="btn-scan" onclick="toggleScan()">▶ 스캔 시작</button>
+  <button id="btn-copy" onclick="copyVal()">📋 복사</button>
+</div>
+<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+<script>
+var scanning = false, stream = null, reader = null, lastVal = '';
+
+async function startScan() {
+  try {
+    document.getElementById('status').textContent = '📷 카메라 연결 중...';
+    // 부모 창의 카메라 권한 사용 (후면 카메라)
+    stream = await window.parent.navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }
+    });
+    var vid = document.getElementById('video');
+    vid.srcObject = stream;
+    await vid.play();
+    scanning = true;
+    document.getElementById('btn-scan').textContent = '⏹ 중지';
+    document.getElementById('btn-scan').style.background = '#555';
+    document.getElementById('status').textContent = '📡 스캔 중... 바코드를 비춰주세요';
+
+    reader = new ZXing.BrowserMultiFormatReader();
+    reader.decodeFromVideoElement(vid, function(result, err) {
+      if (result && scanning) {
+        lastVal = result.getText();
+        document.getElementById('result').innerHTML =
+          '<span style="color:#21c354;font-weight:bold">✅ 인식됨:</span> ' +
+          '<span style="font-size:15px">' + lastVal + '</span>';
+        document.getElementById('btn-copy').style.display = 'block';
+        document.getElementById('status').textContent = '✅ 완료! 아래 저장 버튼을 누르세요.';
+        injectToStreamlit(lastVal);
+        stopScan();
+      }
+    });
+  } catch(e) {
+    document.getElementById('status').textContent = '❌ 카메라 오류: ' + e.message;
+    scanning = false;
+  }
+}
+
+function stopScan() {
+  scanning = false;
+  if (reader) { try { reader.reset(); } catch(e) {} reader = null; }
+  if (stream) { stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  document.getElementById('video').srcObject = null;
+  document.getElementById('btn-scan').textContent = '▶ 다시 스캔';
+  document.getElementById('btn-scan').style.background = '#ff4b4b';
+}
+
+function toggleScan() {
+  if (scanning) { stopScan(); }
+  else {
+    lastVal = '';
+    document.getElementById('result').textContent = '대기 중...';
+    document.getElementById('btn-copy').style.display = 'none';
+    startScan();
+  }
+}
+
+function copyVal() {
+  if (!lastVal) return;
+  try {
+    navigator.clipboard.writeText(lastVal).then(function() {
+      document.getElementById('btn-copy').textContent = '✅ 복사됨!';
+      setTimeout(function(){ document.getElementById('btn-copy').textContent = '📋 복사'; }, 2000);
+    });
+  } catch(e) {}
+}
+
+function injectToStreamlit(value) {
+  try {
+    var doc = window.parent.document;
+    var inputs = doc.querySelectorAll('input[type="text"]');
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      var container = inp.closest('[data-testid="stTextInput"]');
+      if (!container) continue;
+      var lbl = container.querySelector('label');
+      if (!lbl || lbl.textContent.indexOf('📊 바코드') === -1) continue;
+      // React 내부 props로 값 주입 (가장 안정적)
+      var rk = Object.keys(inp).find(function(k){ return k.indexOf('__reactProps$') === 0; });
+      if (rk && inp[rk] && inp[rk].onChange) {
+        inp[rk].onChange({ target: { value: value } });
+        setTimeout(function() {
+          if (inp[rk].onBlur) inp[rk].onBlur({ target: { value: value } });
+        }, 150);
+        return;
+      }
+      // 대체 방법
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(inp, value);
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      inp.dispatchEvent(new Event('blur',   { bubbles: true }));
+      return;
+    }
+  } catch(e) {}
+}
+</script>
+</body>
+</html>"""
+
 # ── API 키 ────────────────────────────────────────────────────────────────────
 def get_api_key():
     try:
@@ -448,18 +587,15 @@ with tab_manual:
 
 # ── 바코드 스캔 탭 ────────────────────────────────────────────────────────────
 with tab_barcode:
-    st.info(
-        "📱 **외부 바코드 스캐너 앱 사용법**\n\n"
-        "1. 아래 입력창을 탭해서 포커스를 맞추세요\n"
-        "2. 스캐너 앱으로 바코드를 스캔하세요\n"
-        "3. 스캔 결과가 자동으로 입력됩니다\n\n"
-        "💡 스캐너 앱 설정에서 **키보드 입력 모드** 또는 **Keyboard Wedge**를 활성화하세요"
-    )
+    st.info("▶ **스캔 시작** 버튼을 누르고 바코드를 카메라에 비추면 자동으로 인식됩니다.")
+
+    # 브라우저 내장 카메라로 직접 스캔 (앱 전환 없음)
+    components.html(SCANNER_HTML, height=340)
 
     scanned = st.text_input(
-        "📊 바코드 입력 (스캐너 앱 또는 직접 입력)",
+        "📊 바코드 (자동 입력 또는 직접 입력)",
         key="scanned_barcode",
-        placeholder="여기를 탭한 후 스캐너 앱으로 스캔하세요"
+        placeholder="스캔하면 자동으로 입력됩니다"
     )
 
     if st.session_state.ingot_list:

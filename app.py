@@ -497,6 +497,8 @@ with tab_barcode:
                 if decoded:
                     scanned_default = decoded[0].data.decode("utf-8", errors="replace")
                     types = [d.type for d in decoded]
+                    # session_state에 직접 주입 → text_input에 자동 반영
+                    st.session_state["scanned_barcode"] = scanned_default
                     st.success(f"✅ 인식됨 ({', '.join(types)}): `{scanned_default}`")
                 else:
                     st.warning(

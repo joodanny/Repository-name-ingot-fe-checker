@@ -389,9 +389,18 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                               key="pending_batch_edit")
 
     unit_label = "N.Wt (MT)" if weight_unit == "MT" else "Net (kg)"
-    edited_wt  = st.text_input(f"⚖️ {unit_label} (수정 가능)",
-                               value=str(net_weight) if net_weight is not None else "",
-                               key="pending_nw_edit")
+    try:
+        default_wt = float(net_weight) if net_weight is not None else 0.0
+    except (ValueError, TypeError):
+        default_wt = 0.0
+    if weight_unit == "MT":
+        edited_wt = st.number_input(f"⚖️ {unit_label}", value=default_wt,
+                                    min_value=0.0, step=0.001, format="%.3f",
+                                    key="pending_nw_edit")
+    else:
+        edited_wt = st.number_input(f"⚖️ {unit_label}", value=default_wt,
+                                    min_value=0.0, step=1.0, format="%.0f",
+                                    key="pending_nw_edit")
 
     result = lookup_batch(edited_no, ref_df) if edited_no else None
 
@@ -413,11 +422,8 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                      disabled=not (result and edited_no), type="primary"):
             if result:
                 label_id = get_next_label()
-                try:
-                    wt_val = float(edited_wt) if edited_wt.strip() else None
-                except ValueError:
-                    wt_val = None
-                nw = f"{wt_val} {weight_unit}" if wt_val is not None else "-"
+                # 숫자만 저장 (단위 없음), 0은 미입력으로 처리
+                nw = str(edited_wt) if edited_wt and edited_wt > 0 else "-"
                 img_b64 = base64.b64encode(image_bytes).decode()
                 st.session_state.ingot_list.append({
                     "라벨ID":   label_id,
@@ -548,13 +554,13 @@ with tab_file:
 # ── 직접 입력 탭 ──────────────────────────────────────────────────────────────
 with tab_manual:
     manual_no = st.text_input("Batch/Cast No 입력 (예: 26D02823-07)")
-    manual_wt = st.text_input("N.Wt 또는 Net kg (선택)", placeholder="예: 0.979 또는 1004")
+    manual_wt = st.number_input("N.Wt 또는 Net kg (선택, 0=미입력)",
+                                min_value=0.0, value=0.0, step=0.001, format="%.3f",
+                                key="manual_wt_input")
     if manual_no and st.button("🔍 조회 및 추가", type="primary"):
         result = lookup_batch(manual_no, ref_df)
-        wt_val = float(manual_wt) if manual_wt else None
-        unit   = "kg" if (wt_val and wt_val > 10) else "MT"
         label_id = get_next_label()
-        nw = f"{wt_val} {unit}" if wt_val else "-"
+        nw = str(manual_wt) if manual_wt and manual_wt > 0 else "-"
         st.session_state.ingot_list.append({
             "라벨ID":   label_id,
             "확인시각": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

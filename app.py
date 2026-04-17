@@ -65,137 +65,6 @@ components.html("""
 </script>
 """, height=0)
 
-# ── 바코드 스캐너 HTML (ZXing-js CDN, 서버 설치 불필요) ───────────────────────
-SCANNER_HTML = """<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0e1117; color: #fafafa; font-family: sans-serif; padding: 6px; }
-#video {
-  width: 100%; height: 210px;
-  background: #111; display: block;
-  border-radius: 8px; object-fit: cover;
-}
-#result {
-  padding: 10px 12px; margin: 6px 0;
-  background: #1e2130; border-radius: 8px;
-  font-size: 13px; min-height: 40px;
-  word-break: break-all; line-height: 1.5;
-}
-#status { font-size: 11px; color: #aaa; padding: 3px 0 5px; }
-.btns { display: flex; gap: 6px; }
-button {
-  flex: 1; padding: 10px 0; border: none;
-  border-radius: 6px; cursor: pointer;
-  font-size: 13px; font-weight: 700;
-}
-#btn-scan { background: #ff4b4b; color: #fff; }
-#btn-copy { background: #21c354; color: #fff; display: none; }
-</style>
-</head>
-<body>
-<video id="video" autoplay playsinline muted></video>
-<div id="status">▶ 스캔 시작 버튼을 누르세요</div>
-<div id="result">대기 중...</div>
-<div class="btns">
-  <button id="btn-scan" onclick="toggleScan()">▶ 스캔 시작</button>
-  <button id="btn-copy" onclick="copyVal()">📋 복사</button>
-</div>
-<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
-<script>
-var scanning = false, stream = null, reader = null, lastVal = '';
-
-async function startScan() {
-  try {
-    document.getElementById('status').textContent = '📷 카메라 연결 중...';
-    stream = await window.parent.navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }
-    });
-    var vid = document.getElementById('video');
-    vid.srcObject = stream;
-    await vid.play();
-    scanning = true;
-    document.getElementById('btn-scan').textContent = '⏹ 중지';
-    document.getElementById('btn-scan').style.background = '#555';
-    document.getElementById('status').textContent = '📡 스캔 중... 바코드를 카메라에 비춰주세요';
-    reader = new ZXing.BrowserMultiFormatReader();
-    reader.decodeFromVideoElement(vid, function(result, err) {
-      if (result && scanning) {
-        lastVal = result.getText();
-        document.getElementById('result').innerHTML =
-          '<span style="color:#21c354;font-weight:bold">✅ 인식됨:</span> ' +
-          '<span style="font-size:15px">' + lastVal + '</span>';
-        document.getElementById('btn-copy').style.display = 'block';
-        document.getElementById('status').textContent = '✅ 스캔 완료!';
-        injectToStreamlit(lastVal);
-        stopScan();
-      }
-    });
-  } catch(e) {
-    document.getElementById('status').textContent = '❌ 카메라 오류: ' + e.message;
-    scanning = false;
-  }
-}
-
-function stopScan() {
-  scanning = false;
-  if (reader) { try { reader.reset(); } catch(e) {} reader = null; }
-  if (stream) { stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
-  document.getElementById('video').srcObject = null;
-  document.getElementById('btn-scan').textContent = '▶ 다시 스캔';
-  document.getElementById('btn-scan').style.background = '#ff4b4b';
-}
-
-function toggleScan() {
-  if (scanning) { stopScan(); }
-  else {
-    lastVal = '';
-    document.getElementById('result').textContent = '대기 중...';
-    document.getElementById('btn-copy').style.display = 'none';
-    startScan();
-  }
-}
-
-function copyVal() {
-  if (!lastVal) return;
-  try {
-    navigator.clipboard.writeText(lastVal).then(function() {
-      document.getElementById('btn-copy').textContent = '✅ 복사됨!';
-      setTimeout(function(){ document.getElementById('btn-copy').textContent = '📋 복사'; }, 2000);
-    });
-  } catch(e) {}
-}
-
-function injectToStreamlit(value) {
-  try {
-    var doc = window.parent.document;
-    var inputs = doc.querySelectorAll('input[type="text"]');
-    for (var i = 0; i < inputs.length; i++) {
-      var inp = inputs[i];
-      var container = inp.closest('[data-testid="stTextInput"]');
-      if (!container) continue;
-      var lbl = container.querySelector('label');
-      if (!lbl || lbl.textContent.indexOf('스캔된 바코드') === -1) continue;
-      var rk = Object.keys(inp).find(function(k){ return k.indexOf('__reactProps$') === 0; });
-      if (rk && inp[rk] && inp[rk].onChange) {
-        inp[rk].onChange({ target: { value: value } });
-        return;
-      }
-      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(inp, value);
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      inp.dispatchEvent(new Event('change', { bubbles: true }));
-      return;
-    }
-  } catch(e) {}
-}
-</script>
-</body>
-</html>"""
-
 # ── API 키 ────────────────────────────────────────────────────────────────────
 def get_api_key():
     try:
@@ -389,18 +258,9 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                               key="pending_batch_edit")
 
     unit_label = "N.Wt (MT)" if weight_unit == "MT" else "Net (kg)"
-    try:
-        default_wt = float(net_weight) if net_weight is not None else 0.0
-    except (ValueError, TypeError):
-        default_wt = 0.0
-    if weight_unit == "MT":
-        edited_wt = st.number_input(f"⚖️ {unit_label}", value=default_wt,
-                                    min_value=0.0, step=0.001, format="%.3f",
-                                    key="pending_nw_edit")
-    else:
-        edited_wt = st.number_input(f"⚖️ {unit_label}", value=default_wt,
-                                    min_value=0.0, step=1.0, format="%.0f",
-                                    key="pending_nw_edit")
+    edited_wt  = st.text_input(f"⚖️ {unit_label} (수정 가능)",
+                               value=str(net_weight) if net_weight is not None else "",
+                               key="pending_nw_edit")
 
     result = lookup_batch(edited_no, ref_df) if edited_no else None
 
@@ -422,8 +282,11 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                      disabled=not (result and edited_no), type="primary"):
             if result:
                 label_id = get_next_label()
-                # 숫자만 저장 (단위 없음), 0은 미입력으로 처리
-                nw = str(edited_wt) if edited_wt and edited_wt > 0 else "-"
+                try:
+                    wt_val = float(edited_wt) if edited_wt.strip() else None
+                except ValueError:
+                    wt_val = None
+                nw = str(wt_val) if wt_val is not None else "-"
                 img_b64 = base64.b64encode(image_bytes).decode()
                 st.session_state.ingot_list.append({
                     "라벨ID":   label_id,
@@ -554,13 +417,12 @@ with tab_file:
 # ── 직접 입력 탭 ──────────────────────────────────────────────────────────────
 with tab_manual:
     manual_no = st.text_input("Batch/Cast No 입력 (예: 26D02823-07)")
-    manual_wt = st.number_input("N.Wt 또는 Net kg (선택, 0=미입력)",
-                                min_value=0.0, value=0.0, step=0.001, format="%.3f",
-                                key="manual_wt_input")
+    manual_wt = st.text_input("N.Wt 또는 Net kg (선택)", placeholder="예: 0.979 또는 1004")
     if manual_no and st.button("🔍 조회 및 추가", type="primary"):
         result = lookup_batch(manual_no, ref_df)
+        wt_val = float(manual_wt) if manual_wt else None
         label_id = get_next_label()
-        nw = str(manual_wt) if manual_wt and manual_wt > 0 else "-"
+        nw = str(wt_val) if wt_val else "-"
         st.session_state.ingot_list.append({
             "라벨ID":   label_id,
             "확인시각": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -586,24 +448,26 @@ with tab_manual:
 
 # ── 바코드 스캔 탭 ────────────────────────────────────────────────────────────
 with tab_barcode:
-    st.info("📊 바코드/QR코드를 카메라에 비추면 자동으로 인식됩니다.\n\n"
-            "인식 후 저장할 잉곳을 선택하고 **💾 바코드 저장** 버튼을 누르세요.")
+    st.info(
+        "📱 **외부 바코드 스캐너 앱 사용법**\n\n"
+        "1. 아래 입력창을 탭해서 포커스를 맞추세요\n"
+        "2. 스캐너 앱으로 바코드를 스캔하세요\n"
+        "3. 스캔 결과가 자동으로 입력됩니다\n\n"
+        "💡 스캐너 앱 설정에서 **키보드 입력 모드** 또는 **Keyboard Wedge**를 활성화하세요"
+    )
 
-    # ZXing-js 스캐너 (JavaScript, CDN, 서버 설치 불필요)
-    components.html(SCANNER_HTML, height=330)
-
-    # 스캔된 값 (JS가 자동 입력하거나 수동 입력)
     scanned = st.text_input(
-        "스캔된 바코드",
+        "📊 바코드 입력 (스캐너 앱 또는 직접 입력)",
         key="scanned_barcode",
-        placeholder="위 스캐너로 자동 입력되거나 직접 입력하세요"
+        placeholder="여기를 탭한 후 스캐너 앱으로 스캔하세요"
     )
 
     if st.session_state.ingot_list:
-        # 최근 5개 항목을 최신순으로 표시
         recent  = list(reversed(st.session_state.ingot_list[-5:]))
-        options = [f"{r['라벨ID']}  |  {r['batch_no']}  |  바코드: {r.get('바코드','없음') or '없음'}"
-                   for r in recent]
+        options = [
+            f"{r['라벨ID']}  |  {r['batch_no']}  |  바코드: {r.get('바코드') or '없음'}"
+            for r in recent
+        ]
         sel = st.radio("저장할 잉곳 선택", range(len(options)),
                        format_func=lambda i: options[i],
                        key="barcode_target")

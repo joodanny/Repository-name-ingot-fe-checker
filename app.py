@@ -43,7 +43,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── 후면 카메라 패치 (보이지 않는 iframe으로 부모 창 getUserMedia 교체) ────────
+# ── 후면 카메라 패치 ──────────────────────────────────────────────────────────
 components.html("""
 <script>
 (function() {
@@ -65,6 +65,137 @@ components.html("""
 </script>
 """, height=0)
 
+# ── 바코드 스캐너 HTML (ZXing-js CDN, 서버 설치 불필요) ───────────────────────
+SCANNER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0e1117; color: #fafafa; font-family: sans-serif; padding: 6px; }
+#video {
+  width: 100%; height: 210px;
+  background: #111; display: block;
+  border-radius: 8px; object-fit: cover;
+}
+#result {
+  padding: 10px 12px; margin: 6px 0;
+  background: #1e2130; border-radius: 8px;
+  font-size: 13px; min-height: 40px;
+  word-break: break-all; line-height: 1.5;
+}
+#status { font-size: 11px; color: #aaa; padding: 3px 0 5px; }
+.btns { display: flex; gap: 6px; }
+button {
+  flex: 1; padding: 10px 0; border: none;
+  border-radius: 6px; cursor: pointer;
+  font-size: 13px; font-weight: 700;
+}
+#btn-scan { background: #ff4b4b; color: #fff; }
+#btn-copy { background: #21c354; color: #fff; display: none; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<div id="status">▶ 스캔 시작 버튼을 누르세요</div>
+<div id="result">대기 중...</div>
+<div class="btns">
+  <button id="btn-scan" onclick="toggleScan()">▶ 스캔 시작</button>
+  <button id="btn-copy" onclick="copyVal()">📋 복사</button>
+</div>
+<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+<script>
+var scanning = false, stream = null, reader = null, lastVal = '';
+
+async function startScan() {
+  try {
+    document.getElementById('status').textContent = '📷 카메라 연결 중...';
+    stream = await window.parent.navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }
+    });
+    var vid = document.getElementById('video');
+    vid.srcObject = stream;
+    await vid.play();
+    scanning = true;
+    document.getElementById('btn-scan').textContent = '⏹ 중지';
+    document.getElementById('btn-scan').style.background = '#555';
+    document.getElementById('status').textContent = '📡 스캔 중... 바코드를 카메라에 비춰주세요';
+    reader = new ZXing.BrowserMultiFormatReader();
+    reader.decodeFromVideoElement(vid, function(result, err) {
+      if (result && scanning) {
+        lastVal = result.getText();
+        document.getElementById('result').innerHTML =
+          '<span style="color:#21c354;font-weight:bold">✅ 인식됨:</span> ' +
+          '<span style="font-size:15px">' + lastVal + '</span>';
+        document.getElementById('btn-copy').style.display = 'block';
+        document.getElementById('status').textContent = '✅ 스캔 완료!';
+        injectToStreamlit(lastVal);
+        stopScan();
+      }
+    });
+  } catch(e) {
+    document.getElementById('status').textContent = '❌ 카메라 오류: ' + e.message;
+    scanning = false;
+  }
+}
+
+function stopScan() {
+  scanning = false;
+  if (reader) { try { reader.reset(); } catch(e) {} reader = null; }
+  if (stream) { stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  document.getElementById('video').srcObject = null;
+  document.getElementById('btn-scan').textContent = '▶ 다시 스캔';
+  document.getElementById('btn-scan').style.background = '#ff4b4b';
+}
+
+function toggleScan() {
+  if (scanning) { stopScan(); }
+  else {
+    lastVal = '';
+    document.getElementById('result').textContent = '대기 중...';
+    document.getElementById('btn-copy').style.display = 'none';
+    startScan();
+  }
+}
+
+function copyVal() {
+  if (!lastVal) return;
+  try {
+    navigator.clipboard.writeText(lastVal).then(function() {
+      document.getElementById('btn-copy').textContent = '✅ 복사됨!';
+      setTimeout(function(){ document.getElementById('btn-copy').textContent = '📋 복사'; }, 2000);
+    });
+  } catch(e) {}
+}
+
+function injectToStreamlit(value) {
+  try {
+    var doc = window.parent.document;
+    var inputs = doc.querySelectorAll('input[type="text"]');
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      var container = inp.closest('[data-testid="stTextInput"]');
+      if (!container) continue;
+      var lbl = container.querySelector('label');
+      if (!lbl || lbl.textContent.indexOf('스캔된 바코드') === -1) continue;
+      var rk = Object.keys(inp).find(function(k){ return k.indexOf('__reactProps$') === 0; });
+      if (rk && inp[rk] && inp[rk].onChange) {
+        inp[rk].onChange({ target: { value: value } });
+        return;
+      }
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(inp, value);
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
+  } catch(e) {}
+}
+</script>
+</body>
+</html>"""
+
 # ── API 키 ────────────────────────────────────────────────────────────────────
 def get_api_key():
     try:
@@ -75,38 +206,29 @@ def get_api_key():
 
 # ── 데이터 파일 저장/불러오기 ─────────────────────────────────────────────────
 def save_data():
-    """ingot_list를 JSON 파일에 저장 (이미지 제외하고 저장, 용량 절약)"""
     try:
-        records_to_save = []
-        for r in st.session_state.ingot_list:
-            rec = {k: v for k, v in r.items() if k != "_img"}
-            records_to_save.append(rec)
+        records_to_save = [{k: v for k, v in r.items() if k != "_img"}
+                           for r in st.session_state.ingot_list]
         DATA_FILE.write_text(
-            json.dumps({
-                "ingot_list": records_to_save,
-                "label_counter": st.session_state.label_counter,
-            }, ensure_ascii=False),
+            json.dumps({"ingot_list": records_to_save,
+                        "label_counter": st.session_state.label_counter},
+                       ensure_ascii=False),
             encoding="utf-8"
         )
     except Exception:
-        pass  # 파일 쓰기 실패해도 앱 중단 안 함
+        pass
 
 def load_data():
-    """앱 시작 시 JSON 파일에서 데이터 로드"""
     try:
         if DATA_FILE.exists():
             raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-            saved_list = raw.get("ingot_list", [])
-            saved_counter = raw.get("label_counter", {})
-            # 이미 session_state에 데이터 없을 때만 로드
             if not st.session_state.ingot_list:
-                for r in saved_list:
-                    if "_img" not in r:
-                        r["_img"] = ""
-                    st.session_state.ingot_list = saved_list
-                    break
+                saved = raw.get("ingot_list", [])
+                for r in saved:
+                    r.setdefault("_img", "")
+                st.session_state.ingot_list = saved
             if not st.session_state.label_counter:
-                st.session_state.label_counter = saved_counter
+                st.session_state.label_counter = raw.get("label_counter", {})
     except Exception:
         pass
 
@@ -141,29 +263,7 @@ def load_reference_data(csv_text: str):
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["batch_no","Fe"]).drop_duplicates(subset=["batch_no"])
 
-# ── ZXing 바코드/QR 디코딩 ────────────────────────────────────────────────────
-def decode_barcodes(image_bytes: bytes) -> dict:
-    """ZXing-C++로 바코드/QR 전체 디코딩 (pyzbar 불필요, 네이티브 라이브러리 불필요)"""
-    try:
-        import zxingcpp
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        results = zxingcpp.read_barcodes(img)
-        barcodes, qr_codes = [], []
-        for r in results:
-            fmt = str(r.format).lower()
-            if "qr" in fmt:
-                qr_codes.append(r.text)
-            else:
-                barcodes.append(r.text)
-        return {
-            "barcode": barcodes[0] if barcodes else None,
-            "qr_code": qr_codes[0] if qr_codes else None,
-            "all": [r.text for r in results],
-        }
-    except Exception:
-        return {"barcode": None, "qr_code": None, "all": []}
-
-# ── 이미지 전처리 (EXIF 보정) ─────────────────────────────────────────────────
+# ── 이미지 전처리 ─────────────────────────────────────────────────────────────
 def preprocess_image(image_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
@@ -215,7 +315,6 @@ JSON만 출력하세요."""}
     return json.loads(m.group()) if m else {}
 
 def extract_label(image_bytes: bytes, api_key: str) -> dict:
-    """원본 → 180° → 90° → 270° 순으로 시도, batch_no 인식되면 반환"""
     for angle in [0, 180, 90, 270]:
         rotated = rotate_image_bytes(image_bytes, angle) if angle != 0 else image_bytes
         result = call_claude(rotated, api_key)
@@ -271,7 +370,7 @@ def make_zip_bytes(records: list) -> bytes:
 
 # ── 인식 결과 카드 ─────────────────────────────────────────────────────────────
 def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
-    extracted = pending["extracted"]
+    extracted   = pending["extracted"]
     image_bytes = pending["image_bytes"]
 
     batch_no    = extracted.get("batch_no", "")
@@ -279,32 +378,21 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     weight_unit = extracted.get("weight_unit", "MT")
     label_type  = "Vedanta" if extracted.get("label_type") == "vedanta" else "RUSAL/Allow"
     rotated     = extracted.get("_rotated", 0)
+    barcode     = extracted.get("barcode")
+    qr_code     = extracted.get("qr_code")
 
-    # 바코드/QR: ZXing 우선, 없으면 Claude 결과 사용
-    zxing       = pending.get("zxing", {})
-    barcode     = zxing.get("barcode") or extracted.get("barcode")
-    qr_code     = zxing.get("qr_code") or extracted.get("qr_code")
-    barcode_src = "🔍 ZXing" if zxing.get("barcode") else ("👁️ Claude" if extracted.get("barcode") else "")
-    qr_src      = "🔍 ZXing" if zxing.get("qr_code") else ("👁️ Claude" if extracted.get("qr_code") else "")
-
-    # 사진
     st.image(image_bytes, use_container_width=True)
     if rotated:
         st.caption(f"🔄 {rotated}° 회전하여 인식")
 
-    # 번호 수정 가능
     edited_no = st.text_input("인식된 번호 (수정 가능)", value=batch_no,
                               key="pending_batch_edit")
 
-    # 무게 수정 가능
     unit_label = "N.Wt (MT)" if weight_unit == "MT" else "Net (kg)"
-    edited_wt = st.text_input(
-        f"⚖️ {unit_label} (수정 가능)",
-        value=str(net_weight) if net_weight is not None else "",
-        key="pending_nw_edit"
-    )
+    edited_wt  = st.text_input(f"⚖️ {unit_label} (수정 가능)",
+                               value=str(net_weight) if net_weight is not None else "",
+                               key="pending_nw_edit")
 
-    # Fe 판정
     result = lookup_batch(edited_no, ref_df) if edited_no else None
 
     if result:
@@ -319,16 +407,12 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
             if result.get("suggestions"):
                 st.write("유사 번호: " + " / ".join(f"`{s}`" for s in result["suggestions"]))
 
-    # ── 확인 / 다시 버튼 (판정 결과 바로 아래) ──────────────────────────────
     col_ok, col_retry = st.columns(2)
-
     with col_ok:
-        ok_disabled = not (result and edited_no)
         if st.button("✅ 확인 (리스트 추가)", use_container_width=True,
-                     disabled=ok_disabled, type="primary"):
+                     disabled=not (result and edited_no), type="primary"):
             if result:
                 label_id = get_next_label()
-                # 수정된 무게 값 사용
                 try:
                     wt_val = float(edited_wt) if edited_wt.strip() else None
                 except ValueError:
@@ -356,14 +440,12 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
                 st.session_state.pending = None
                 st.session_state.cam_key += 1
                 st.rerun()
-
     with col_retry:
         if st.button("🔄 다시 찍기", use_container_width=True):
             st.session_state.pending = None
             st.session_state.cam_key += 1
             st.rerun()
 
-    # 상세 성분 (버튼 아래)
     if result and result["found"]:
         st.divider()
         col1, col2, col3 = st.columns(3)
@@ -378,13 +460,10 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
             if result.get("zn"): st.metric("Zn", f"{result['zn']:.4f}")
             if result.get("mg"): st.metric("Mg", f"{result['mg']:.4f}")
 
-    # 바코드/QR 정보
     if barcode or qr_code:
         st.divider()
-        if barcode:
-            st.caption(f"📊 바코드 {barcode_src}: `{barcode}`")
-        if qr_code:
-            st.caption(f"📱 QR코드 {qr_src}: `{qr_code}`")
+        if barcode: st.caption(f"📊 바코드: `{barcode}`")
+        if qr_code: st.caption(f"📱 QR코드: `{qr_code}`")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  메인
@@ -392,13 +471,11 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
 st.title("🔍 잉곳 Fe 판정기")
 st.caption("사진 촬영 → 번호 인식 → 확인 버튼으로 저장")
 
-# 세션 초기화
 for key, val in [("ingot_list",[]), ("label_counter",{}),
                  ("pending", None), ("cam_key", 0)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
-# 저장된 데이터 불러오기 (앱 시작 시)
 load_data()
 
 api_key = get_api_key()
@@ -413,7 +490,9 @@ except Exception as e:
     st.error(f"❌ 기준 CSV 로드 실패: {e}"); st.stop()
 
 # ── 탭 ────────────────────────────────────────────────────────────────────────
-tab_cam, tab_file, tab_manual = st.tabs(["📷 카메라 촬영", "📁 파일 업로드", "⌨️ 직접 입력"])
+tab_cam, tab_file, tab_manual, tab_barcode = st.tabs(
+    ["📷 카메라 촬영", "📁 파일 업로드", "⌨️ 직접 입력", "📊 바코드 스캔"]
+)
 
 # ── 카메라 탭 ─────────────────────────────────────────────────────────────────
 with tab_cam:
@@ -428,16 +507,14 @@ with tab_cam:
             with st.spinner("🔄 라벨 인식 중... (2~3초)"):
                 try:
                     extracted = extract_label(processed, api_key)
-                    zxing = decode_barcodes(processed)
                 except Exception as e:
-                    st.error(f"API 오류: {e}"); extracted = {}; zxing = {}
+                    st.error(f"API 오류: {e}"); extracted = {}
 
             if extracted.get("batch_no"):
                 st.session_state.pending = {
                     "extracted":   extracted,
                     "image_bytes": processed,
                     "source":      "카메라",
-                    "zxing":       zxing,
                 }
                 st.rerun()
             else:
@@ -455,16 +532,14 @@ with tab_file:
         with st.spinner("🔄 라벨 인식 중..."):
             try:
                 extracted = extract_label(processed, api_key)
-                zxing = decode_barcodes(processed)
             except Exception as e:
-                st.error(f"API 오류: {e}"); extracted = {}; zxing = {}
+                st.error(f"API 오류: {e}"); extracted = {}
 
         if extracted.get("batch_no"):
             st.session_state.pending = {
                 "extracted":   extracted,
                 "image_bytes": processed,
                 "source":      "파일",
-                "zxing":       zxing,
             }
             show_recognition_result(st.session_state.pending, ref_df)
         else:
@@ -477,7 +552,7 @@ with tab_manual:
     if manual_no and st.button("🔍 조회 및 추가", type="primary"):
         result = lookup_batch(manual_no, ref_df)
         wt_val = float(manual_wt) if manual_wt else None
-        unit = "kg" if (wt_val and wt_val > 10) else "MT"
+        unit   = "kg" if (wt_val and wt_val > 10) else "MT"
         label_id = get_next_label()
         nw = f"{wt_val} {unit}" if wt_val else "-"
         st.session_state.ingot_list.append({
@@ -503,6 +578,42 @@ with tab_manual:
         else:
             st.warning(f"기준표에 없음 → {label_id} 저장됨 (Fe 미기재)")
 
+# ── 바코드 스캔 탭 ────────────────────────────────────────────────────────────
+with tab_barcode:
+    st.info("📊 바코드/QR코드를 카메라에 비추면 자동으로 인식됩니다.\n\n"
+            "인식 후 저장할 잉곳을 선택하고 **💾 바코드 저장** 버튼을 누르세요.")
+
+    # ZXing-js 스캐너 (JavaScript, CDN, 서버 설치 불필요)
+    components.html(SCANNER_HTML, height=330)
+
+    # 스캔된 값 (JS가 자동 입력하거나 수동 입력)
+    scanned = st.text_input(
+        "스캔된 바코드",
+        key="scanned_barcode",
+        placeholder="위 스캐너로 자동 입력되거나 직접 입력하세요"
+    )
+
+    if st.session_state.ingot_list:
+        # 최근 5개 항목을 최신순으로 표시
+        recent  = list(reversed(st.session_state.ingot_list[-5:]))
+        options = [f"{r['라벨ID']}  |  {r['batch_no']}  |  바코드: {r.get('바코드','없음') or '없음'}"
+                   for r in recent]
+        sel = st.radio("저장할 잉곳 선택", range(len(options)),
+                       format_func=lambda i: options[i],
+                       key="barcode_target")
+        target = recent[sel]
+
+        if st.button("💾 바코드 저장", type="primary", disabled=not scanned):
+            for r in st.session_state.ingot_list:
+                if r["라벨ID"] == target["라벨ID"]:
+                    r["바코드"] = scanned
+                    break
+            save_data()
+            st.success(f"✅ [{target['라벨ID']}] 바코드 저장 완료: `{scanned}`")
+            st.rerun()
+    else:
+        st.warning("⚠️ 먼저 📷 카메라 탭에서 잉곳을 추가하세요.")
+
 # ── 누적 목록 ─────────────────────────────────────────────────────────────────
 st.divider()
 st.subheader("📋 확인된 잉곳 목록")
@@ -510,18 +621,15 @@ st.subheader("📋 확인된 잉곳 목록")
 if st.session_state.ingot_list:
     display_cols = ["라벨ID","확인시각","라벨유형","batch_no",
                     "N.Wt/Net","Fe","Si","Cu","Zn","판정","상태","바코드","QR코드"]
-    # 없는 컬럼은 빈 문자열로 채움 (이전 저장 데이터 호환)
     df_raw = pd.DataFrame(st.session_state.ingot_list)
     for c in display_cols:
         if c not in df_raw.columns:
             df_raw[c] = ""
-    df_list = df_raw[display_cols]
-    st.dataframe(df_list, use_container_width=True)
+    st.dataframe(df_raw[display_cols], use_container_width=True)
 
     only_ng = [r for r in st.session_state.ingot_list if r.get("상태") == "NG"]
     st.write(f"총 **{len(st.session_state.ingot_list)}**건 | NG: **{len(only_ng)}**건")
 
-    # 사진 미리보기
     photos = [(r["라벨ID"], r["_img"])
               for r in st.session_state.ingot_list if r.get("_img")]
     if photos:

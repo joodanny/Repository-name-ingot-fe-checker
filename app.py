@@ -140,6 +140,57 @@ def preprocess_image(image_bytes: bytes) -> bytes:
     img.save(buf, format="JPEG", quality=92)
     return buf.getvalue()
 
+def crop_to_label(image_bytes: bytes) -> bytes:
+    """엣지 밀도·밝기 분석으로 라벨 영역만 자동 크롭합니다."""
+    try:
+        from PIL import ImageFilter
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        gray = img.convert("L")
+
+        # 분석 속도를 위해 600px 썸네일 사용
+        scale = min(1.0, 600 / max(w, h))
+        tw, th = max(1, int(w * scale)), max(1, int(h * scale))
+        thumb = gray.resize((tw, th), Image.LANCZOS)
+
+        edges = thumb.filter(ImageFilter.FIND_EDGES)
+        e_pix = list(edges.getdata())
+        b_pix = list(thumb.getdata())
+
+        # 행별 엣지 밀도 (텍스트 = 엣지 많음)
+        row_edge   = [sum(e_pix[r * tw:(r + 1) * tw])      for r in range(th)]
+        # 행별 평균 밝기 (흰 라벨지 = 밝음)
+        row_bright = [sum(b_pix[r * tw:(r + 1) * tw]) / tw for r in range(th)]
+
+        max_edge   = max(row_edge)   if row_edge   else 1
+        avg_bright = sum(row_bright) / len(row_bright) if row_bright else 128
+
+        # 라벨 행 = 엣지 충분 + 배경보다 밝음
+        label_rows = [
+            r for r in range(th)
+            if row_edge[r]   > max_edge   * 0.12
+            and row_bright[r] > avg_bright * 0.82
+        ]
+
+        # 감지 실패 시 원본 반환
+        if len(label_rows) < 3:
+            return image_bytes
+
+        pad    = max(30, h // 10)                        # 위아래 여백
+        top    = max(0, int(min(label_rows) / scale) - pad)
+        bottom = min(h, int(max(label_rows) / scale) + pad)
+
+        # 잘린 높이가 원본의 8% 미만이면 잘못 감지한 것 → 원본 반환
+        if (bottom - top) < h * 0.08:
+            return image_bytes
+
+        cropped = img.crop((0, top, w, bottom))
+        buf = io.BytesIO()
+        cropped.save(buf, format="JPEG", quality=92)
+        return buf.getvalue()
+    except Exception:
+        return image_bytes  # 오류 시 원본 그대로
+
 def rotate_image_bytes(image_bytes: bytes, angle: int) -> bytes:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.rotate(angle, expand=True)
@@ -149,6 +200,23 @@ def rotate_image_bytes(image_bytes: bytes, angle: int) -> bytes:
 
 # ── Claude Vision OCR ─────────────────────────────────────────────────────────
 def call_claude(image_bytes: bytes, api_key: str) -> dict:
+    # OCR 정확도 향상 전처리: 확대 + 대비/선명도 강화
+    try:
+        from PIL import ImageEnhance, ImageFilter
+        _img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        _w, _h = _img.size
+        # 최소 1400px 이상으로 확대 (작은 이미지 보정)
+        if max(_w, _h) < 1400:
+            _s = 1400 / max(_w, _h)
+            _img = _img.resize((int(_w * _s), int(_h * _s)), Image.LANCZOS)
+        _img = ImageEnhance.Contrast(_img).enhance(1.5)
+        _img = ImageEnhance.Sharpness(_img).enhance(2.0)
+        _img = _img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+        _buf = io.BytesIO()
+        _img.save(_buf, format="JPEG", quality=95)
+        image_bytes = _buf.getvalue()
+    except Exception:
+        pass  # 실패 시 원본 사용
     client = anthropic.Anthropic(api_key=api_key)
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     msg = client.messages.create(
@@ -249,7 +317,10 @@ def show_recognition_result(pending: dict, ref_df: pd.DataFrame):
     barcode     = extracted.get("barcode")
     qr_code     = extracted.get("qr_code")
 
-    st.image(image_bytes, use_container_width=True)
+    # 사진을 절반 크기로 표시 (버튼 접근성 향상)
+    col_photo, _ = st.columns([1, 1])
+    with col_photo:
+        st.image(image_bytes, use_container_width=True)
     if rotated:
         st.caption(f"🔄 {rotated}° 회전하여 인식")
 
@@ -372,6 +443,7 @@ with tab_cam:
                                     key=f"cam_{st.session_state.cam_key}")
         if cam_image:
             processed = preprocess_image(cam_image.getvalue())
+            processed = crop_to_label(processed)          # 라벨 영역 자동 크롭
             with st.spinner("🔄 라벨 인식 중... (2~3초)"):
                 try:
                     extracted = extract_label(processed, api_key)
@@ -396,6 +468,7 @@ with tab_file:
     uploaded = st.file_uploader("사진 선택", type=["jpg","jpeg","png"])
     if uploaded:
         processed = preprocess_image(uploaded.getvalue())
+        processed = crop_to_label(processed)              # 라벨 영역 자동 크롭
         st.image(processed, use_container_width=True)
         with st.spinner("🔄 라벨 인식 중..."):
             try:
@@ -504,17 +577,41 @@ with tab_barcode:
 
                 decoded = try_all(attempts)
 
-                # Phase 2: 기울기 보정 — ±5°씩 최대 ±30° 회전 시도
+                # Phase 1.5: 추가 전처리 — 임계값 이진화 / 반전 / 자동대비
                 if not decoded:
-                    for angle in [-5, 5, -10, 10, -15, 15, -20, 20, -25, 25, -30, 30]:
-                        rotated_gray = gray.rotate(
-                            angle, expand=True, fillcolor=255)
-                        rotated_unsharp = unsharp_gray.rotate(
-                            angle, expand=True, fillcolor=255)
+                    try:
+                        autocon  = ImageOps.autocontrast(gray)
+                        inv_gray = ImageOps.invert(gray)
+                        big2l    = base.resize((w*2, h*2), Image.LANCZOS).convert("L")
+                        inv_big  = ImageOps.invert(big2l)
+                        extra = [
+                            autocon,
+                            ImageOps.autocontrast(unsharp_gray),
+                            gray.point(lambda x: 0 if x < 100 else 255),
+                            gray.point(lambda x: 0 if x < 128 else 255),
+                            gray.point(lambda x: 0 if x < 155 else 255),
+                            inv_gray,
+                            inv_big,
+                            ImageEnhance.Contrast(autocon).enhance(2.0),
+                            autocon.resize((w*2, h*2), Image.LANCZOS),
+                        ]
+                        decoded = try_all(extra)
+                    except Exception:
+                        pass
+
+                # Phase 2: 기울기 보정 — ±5°씩 최대 ±45° 회전 시도
+                if not decoded:
+                    for angle in [-5, 5, -10, 10, -15, 15, -20, 20,
+                                  -25, 25, -30, 30, -35, 35, -40, 40, -45, 45]:
+                        rotated_gray    = gray.rotate(angle, expand=True, fillcolor=255)
+                        rotated_unsharp = unsharp_gray.rotate(angle, expand=True, fillcolor=255)
+                        rotated_autocon = ImageOps.autocontrast(rotated_gray)
                         decoded = try_all([
                             rotated_gray,
                             rotated_unsharp,
+                            rotated_autocon,
                             ImageEnhance.Contrast(rotated_unsharp).enhance(2.0),
+                            rotated_gray.point(lambda x: 0 if x < 128 else 255),
                         ])
                         if decoded:
                             break
